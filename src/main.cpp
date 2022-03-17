@@ -143,7 +143,17 @@ int run_batch_calibration(Settings *run_settings,std::vector<double> gt_exp_time
     Tracker tracker(run_settings->tracker_patch_size,run_settings->nr_active_features,run_settings->nr_pyramid_levels,&database);
     
     int num_images = image_reader.getNumImages();
-    
+
+    char inverse_response_filename[] = "InverseResponse.txt";
+    FILE* fd = fopen(inverse_response_filename, "w");
+    if (fd == NULL) {
+    	std::cerr << "Failed to open file " << inverse_response_filename << " for writing, not writing inverse response predictions.\n";
+    }
+
+    cv::Mat raw_inverse_response_acc = cv::Mat::zeros(1, 256, CV_64F);
+    cv::Mat vignette_image_acc = cv::Mat::zeros(run_settings->image_height, run_settings->image_width, CV_64F);
+    int successes = 0;
+
     // Run over all input images, track the new image, estimate exposure time and optimize other parameters in the background
     for(int i = run_settings->start_image_index; i < num_images && (run_settings->end_image_index < 0 || i < run_settings->end_image_index); i++)
     {
@@ -201,6 +211,28 @@ int run_batch_calibration(Settings *run_settings,std::vector<double> gt_exp_time
             // Show optimization result
             vis_exponent = backend_optimizer.visualizeOptimizationResult(backend_optimizer.m_raw_inverse_response);
 
+            successes++;
+
+			for (int i = 0 ; i < 256 ; i++) {
+				double v = backend_optimizer.m_raw_inverse_response[i];
+				raw_inverse_response_acc.at<double>(0,i) += v;
+				if (fd != NULL) {
+					fprintf(fd, "%f ", v * 255);
+					if (i == 255) {
+						fprintf(fd, ";\n");
+						fflush(fd);
+					}
+				}
+            }
+
+            cv::Point p;
+            for (p.x = 0 ; p.x < run_settings->image_width ; p.x++) {
+            	for (p.y = 0 ; p.y < run_settings->image_height ; p.y++) {
+            		double factor = database.m_vignette_estimate.getVignetteFactor(p);
+            		vignette_image_acc.at<double>(p) += factor;
+            	}
+            }
+
             // Remove frames except for some overlap in order to align exposures later
             for(int k = 0;k < run_settings->nr_active_frames-30;k++)
             {
@@ -214,7 +246,34 @@ int run_batch_calibration(Settings *run_settings,std::vector<double> gt_exp_time
             return -1;
         }
     }
-    
+
+    // vis_exponent = 1.0;
+
+    if (fd != NULL) {
+    	fprintf(fd, "vis_exponent: %f\n", vis_exponent);
+    	raw_inverse_response_acc /= successes;
+    	pow(raw_inverse_response_acc, vis_exponent, raw_inverse_response_acc);
+    	raw_inverse_response_acc *= 255.0;
+    	for (int i = 0 ; i < 256 ; i++) {
+    		if (fd != NULL) {
+    			fprintf(fd, "%f ", raw_inverse_response_acc.at<double>(0,i));
+    		}
+    	}
+		fprintf(fd, "\n");
+    	fclose(fd);
+    	std::cout << "Written inverse response predictions to file " << inverse_response_filename << "\n";
+    }
+
+    vignette_image_acc /= successes;
+    pow(vignette_image_acc, vis_exponent, vignette_image_acc);
+    cv::Mat vignette_image = cv::Mat::zeros(run_settings->image_height, run_settings->image_width, CV_16UC1);
+    vignette_image_acc.convertTo(vignette_image, CV_16UC1, UINT16_MAX, 0);
+
+    std::string vignette_image_filename = "vignette.png";
+    if (cv::imwrite(vignette_image_filename, vignette_image)) {
+    	std::cout << "Written vignette_image prediction to file " << vignette_image_filename << "\n";
+    }
+
     return 0;
 }
 
@@ -346,7 +405,48 @@ int run_online_calibration(Settings *run_settings,std::vector<double> gt_exp_tim
 
         vis_exponent = backend_optimizer.visualizeOptimizationResult(backend_optimizer.m_raw_inverse_response);
     }
-    
+
+    // Save inverse response curve and vignette image...
+	vis_exponent = 1;
+
+    char inverse_response_filename[] = "pcalib.txt";
+	FILE* fd = fopen(inverse_response_filename, "w");
+	if (fd == NULL) {
+		std::cerr << "Failed to open file " << inverse_response_filename << " for writing, not writing inverse response predictions.\n";
+	} else {
+		cv::Mat raw_inverse_response = cv::Mat::zeros(1, 256, CV_64F);
+		for (int i = 0 ; i < 256 ; i++) {
+			double v = backend_optimizer.m_raw_inverse_response[i];
+			raw_inverse_response.at<double>(0,i) = v;
+		}
+
+		pow(raw_inverse_response, vis_exponent, raw_inverse_response);
+		raw_inverse_response *= 255.0;
+		for (int i = 0 ; i < 256 ; i++) {
+			fprintf(fd, "%f ", raw_inverse_response.at<double>(0,i));
+		}
+		fprintf(fd, "\nvis_exponent: %f\n", vis_exponent);
+		fclose(fd);
+		std::cout << "Written inverse response predictions to file " << inverse_response_filename << "\n";
+	}
+
+	cv::Mat vignette_mat = cv::Mat::zeros(run_settings->image_height, run_settings->image_width, CV_64F);
+    cv::Point p;
+	for (p.x = 0 ; p.x < run_settings->image_width ; p.x++) {
+		for (p.y = 0 ; p.y < run_settings->image_height ; p.y++) {
+			double factor = database.m_vignette_estimate.getVignetteFactor(p);
+			vignette_mat.at<double>(p) = factor;
+		}
+	}
+
+	pow(vignette_mat, vis_exponent, vignette_mat);
+	cv::Mat vignette_image = cv::Mat::zeros(run_settings->image_height, run_settings->image_width, CV_16UC1);
+	vignette_mat.convertTo(vignette_image, CV_16UC1, UINT16_MAX, 0);
+	std::string vignette_image_filename = "vignette.png";
+	if (cv::imwrite(vignette_image_filename, vignette_image)) {
+		std::cout << "Written vignette_image prediction to file " << vignette_image_filename << "\n";
+	}
+
     return 0;
 }
 
